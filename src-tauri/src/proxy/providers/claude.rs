@@ -398,11 +398,13 @@ pub fn transform_claude_request_for_api_format(
             // Codex OAuth (ChatGPT Plus/Pro 反代) 需要在请求体里强制 store: false
             // + include: ["reasoning.encrypted_content"]，由 transform 层统一处理。
             let codex_fast_mode = provider.codex_fast_mode_enabled();
-            let mut result = super::transform_responses::anthropic_to_responses(
+            let force_stream = provider.force_stream_enabled();
+            let mut result = super::transform_responses::anthropic_to_responses_with_force_stream(
                 body,
                 cache_key,
                 is_codex_oauth,
                 codex_fast_mode,
+                force_stream,
             )?;
             if provider.is_xai_oauth() {
                 const REASONING_MARKER: &str = "reasoning.encrypted_content";

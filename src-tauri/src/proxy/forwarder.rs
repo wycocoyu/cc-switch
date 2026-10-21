@@ -2070,6 +2070,11 @@ impl RequestForwarder {
                 }
             }
         }
+        apply_provider_stream_policy(
+            &mut filtered_body,
+            provider,
+            resolved_claude_api_format.as_deref(),
+        );
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
             .get("model")
@@ -4267,6 +4272,16 @@ fn is_streaming_request(endpoint: &str, body: &Value, headers: &axum::http::Head
         .unwrap_or(false)
 }
 
+fn apply_provider_stream_policy(
+    body: &mut Value,
+    provider: &Provider,
+    resolved_claude_api_format: Option<&str>,
+) {
+    if resolved_claude_api_format == Some("openai_responses") && provider.force_stream_enabled() {
+        body["stream"] = Value::Bool(true);
+    }
+}
+
 #[cfg(test)]
 fn should_force_identity_encoding(
     endpoint: &str,
@@ -4967,6 +4982,39 @@ mod tests {
         assert_eq!(body["metadata"]["temperature"], 0.2);
         assert_eq!(body["metadata"]["top_p"], 0.9);
         assert_eq!(body["messages"], json!([]));
+    }
+
+    #[test]
+    fn force_stream_wins_over_body_override_for_transformed_responses() {
+        let mut body = json!({"stream": false});
+        let overrides = LocalProxyRequestOverrides {
+            headers: HashMap::new(),
+            body: Some(json!({"stream": false})),
+        };
+        apply_local_proxy_body_overrides(&mut body, &overrides);
+
+        let mut provider = Provider::with_id("p".to_string(), "P".to_string(), json!({}), None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            force_stream: Some(true),
+            ..Default::default()
+        });
+        apply_provider_stream_policy(&mut body, &provider, Some("openai_responses"));
+
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn force_stream_does_not_apply_to_native_responses() {
+        let mut body = json!({"stream": false});
+        let mut provider = Provider::with_id("p".to_string(), "P".to_string(), json!({}), None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            force_stream: Some(true),
+            ..Default::default()
+        });
+
+        apply_provider_stream_policy(&mut body, &provider, None);
+
+        assert_eq!(body["stream"], false);
     }
 
     #[test]

@@ -132,6 +132,13 @@ impl Provider {
             .unwrap_or(false)
     }
 
+    pub fn force_stream_enabled(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.force_stream)
+            .unwrap_or(false)
+    }
+
     pub fn has_usage_script_enabled(&self) -> bool {
         self.meta
             .as_ref()
@@ -554,6 +561,9 @@ pub struct ProviderMeta {
     /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
     #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
     pub codex_fast_mode: Option<bool>,
+    /// Configuration-only override for transformed OpenAI Responses requests.
+    #[serde(rename = "forceStream", skip_serializing_if = "Option::is_none")]
+    pub force_stream: Option<bool>,
     /// Codex Responses -> Chat Completions reasoning capability metadata.
     #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
     pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
@@ -1164,6 +1174,25 @@ mod tests {
 
         let parsed: ProviderMeta = serde_json::from_value(value).expect("deserialize ProviderMeta");
         assert_eq!(parsed.max_output_tokens, Some(64000));
+    }
+
+    #[test]
+    fn provider_meta_roundtrips_force_stream_and_defaults_off() {
+        let default_meta: ProviderMeta =
+            serde_json::from_value(json!({})).expect("deserialize legacy ProviderMeta");
+        assert_eq!(default_meta.force_stream, None);
+        assert!(!default_meta.force_stream.unwrap_or(false));
+
+        let meta = ProviderMeta {
+            force_stream: Some(true),
+            ..ProviderMeta::default()
+        };
+        let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
+        assert_eq!(value["forceStream"], true);
+        assert!(value.get("force_stream").is_none());
+
+        let parsed: ProviderMeta = serde_json::from_value(value).expect("deserialize ProviderMeta");
+        assert_eq!(parsed.force_stream, Some(true));
     }
 
     #[test]

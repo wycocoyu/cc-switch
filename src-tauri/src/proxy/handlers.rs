@@ -552,23 +552,17 @@ async fn handle_claude_transform(
         .as_ref()
         .and_then(|meta| meta.provider_type.as_deref())
         == Some("codex_oauth");
-    // Codex OAuth 会把 openai_responses 响应强制升级为 SSE，即使客户端发的是 stream:false。
-    // should_use_claude_transform_streaming 默认会把这个组合路由到流式转换器——虽然能避免
-    // JSON parse 报 422，但会让非流客户端收到 text/event-stream，违反 Anthropic 非流语义。
-    // 这里为这个特定组合打开 override：把上游 SSE 聚合成 Anthropic JSON 回给客户端，其它
-    // 场景（任意上游 is_sse、非 Codex OAuth 等）仍沿用原有流式兜底。
-    let aggregate_codex_oauth_responses_sse =
-        !is_stream && is_codex_oauth && api_format == "openai_responses";
-    let use_streaming = if aggregate_codex_oauth_responses_sse {
-        false
-    } else {
-        should_use_claude_transform_streaming(
-            is_stream,
-            response.is_sse(),
-            api_format,
-            is_codex_oauth,
-        )
-    };
+    // OAuth 与 forceStream 都可能把非流 Responses 请求强制升级为 SSE。
+    let aggregate_non_streaming_responses_sse = !is_stream
+        && api_format == "openai_responses"
+        && (is_codex_oauth || ctx.provider.force_stream_enabled());
+    let use_streaming = should_use_claude_transform_streaming(
+        is_stream,
+        response.is_sse(),
+        api_format,
+        is_codex_oauth,
+        ctx.provider.force_stream_enabled(),
+    );
     let tool_schema_hints = transform_gemini::extract_anthropic_tool_schema_hints(original_body);
     let tool_schema_hints = (!tool_schema_hints.is_empty()).then_some(tool_schema_hints);
     let hosted_web_search_name =
@@ -699,7 +693,7 @@ async fn handle_claude_transform(
             std::time::Duration::ZERO
         };
     let enforce_codex_web_search_limit_while_aggregating =
-        aggregate_codex_oauth_responses_sse && hosted_web_search_max_uses.is_some();
+        aggregate_non_streaming_responses_sse && hosted_web_search_max_uses.is_some();
     let (mut response_headers, direct_anthropic_response, upstream_response) =
         if enforce_codex_web_search_limit_while_aggregating {
             if let Some(encoding) = get_content_encoding(response.headers()) {
@@ -723,7 +717,7 @@ async fn handle_claude_transform(
             let (response_headers, _status, body_bytes) =
                 read_decoded_body(response, ctx.tag, body_timeout).await?;
             let body_str = String::from_utf8_lossy(&body_bytes);
-            let upstream_response = if aggregate_codex_oauth_responses_sse {
+            let upstream_response = if aggregate_non_streaming_responses_sse {
                 responses_sse_to_response_value(&body_str)?
             } else {
                 match serde_json::from_slice(&body_bytes) {
@@ -2584,8 +2578,16 @@ fn should_use_claude_transform_streaming(
     upstream_is_sse: bool,
     api_format: &str,
     is_codex_oauth: bool,
+    force_stream_enabled: bool,
 ) -> bool {
-    requested_streaming || upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
+    let aggregate_non_streaming_responses_sse = !requested_streaming
+        && api_format == "openai_responses"
+        && (is_codex_oauth || force_stream_enabled);
+
+    !aggregate_non_streaming_responses_sse
+        && (requested_streaming
+            || upstream_is_sse
+            || (is_codex_oauth && api_format == "openai_responses"))
 }
 
 async fn responses_sse_stream_to_anthropic_message(
@@ -2635,7 +2637,7 @@ async fn responses_sse_stream_to_anthropic_message(
 }
 
 /// 把 OpenAI Responses SSE 流聚合成一个完整的 Responses JSON 对象，供下游转成 Anthropic
-/// 非流响应。仅在 Codex OAuth 把 `stream:false` 强制升级为 SSE 的场景下调用。
+/// 非流响应。仅在 OAuth 或 forceStream 把 `stream:false` 强制升级为 SSE 的场景下调用。
 ///
 /// 复用 `proxy::sse` 的 `take_sse_block`/`strip_sse_field`：`take_sse_block` 同时支持
 /// `\n\n` 与 `\r\n\r\n` 两种分隔符，`strip_sse_field` 兼容带/不带空格的字段写法。
@@ -3878,11 +3880,30 @@ data: [DONE]\n\n";
     }
 
     #[test]
-    fn codex_oauth_responses_force_streaming_even_if_client_sent_false() {
-        assert!(should_use_claude_transform_streaming(
+    fn codex_oauth_non_streaming_responses_sse_is_aggregated() {
+        assert!(!should_use_claude_transform_streaming(
             false,
-            false,
+            true,
             "openai_responses",
+            true,
+            false,
+        ));
+        assert!(should_use_claude_transform_streaming(
+            true,
+            true,
+            "openai_responses",
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn force_stream_non_streaming_responses_sse_is_aggregated() {
+        assert!(!should_use_claude_transform_streaming(
+            false,
+            true,
+            "openai_responses",
+            false,
             true,
         ));
     }
@@ -3952,6 +3973,7 @@ data: [DONE]\n\n";
             true,
             "openai_chat",
             false,
+            false,
         ));
     }
 
@@ -3961,6 +3983,14 @@ data: [DONE]\n\n";
             false,
             false,
             "openai_responses",
+            false,
+            false,
+        ));
+        assert!(should_use_claude_transform_streaming(
+            false,
+            true,
+            "openai_responses",
+            false,
             false,
         ));
     }

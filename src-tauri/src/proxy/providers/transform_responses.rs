@@ -1778,6 +1778,22 @@ pub fn anthropic_to_responses(
     is_codex_oauth: bool,
     codex_fast_mode: bool,
 ) -> Result<Value, ProxyError> {
+    anthropic_to_responses_with_force_stream(
+        body,
+        cache_key,
+        is_codex_oauth,
+        codex_fast_mode,
+        false,
+    )
+}
+
+pub fn anthropic_to_responses_with_force_stream(
+    body: Value,
+    cache_key: Option<&str>,
+    is_codex_oauth: bool,
+    codex_fast_mode: bool,
+    force_stream: bool,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
     // NOTE: 模型映射由上游统一处理（proxy::model_mapper），格式转换层只做结构转换。
@@ -1835,6 +1851,9 @@ pub fn anthropic_to_responses(
     }
     if let Some(v) = body.get("stream") {
         result["stream"] = v.clone();
+    }
+    if force_stream {
+        result["stream"] = json!(true);
     }
 
     // Map Anthropic thinking → OpenAI Responses reasoning.effort
@@ -5238,6 +5257,40 @@ mod tests {
         assert!(result.get("store").is_none());
         assert!(result.get("service_tier").is_none());
         assert!(result.get("include").is_none());
+    }
+
+    #[test]
+    fn test_force_stream_overrides_missing_or_false_stream() {
+        for stream in [None, Some(false)] {
+            let mut input = json!({
+                "model": "gpt-5-codex",
+                "messages": [{"role": "user", "content": "Hello"}]
+            });
+            if let Some(stream) = stream {
+                input["stream"] = json!(stream);
+            }
+
+            let result =
+                anthropic_to_responses_with_force_stream(input, None, false, false, true).unwrap();
+            assert_eq!(result["stream"], json!(true));
+        }
+    }
+
+    #[test]
+    fn test_force_stream_disabled_preserves_client_stream_semantics() {
+        for stream in [None, Some(false), Some(true)] {
+            let mut input = json!({
+                "model": "gpt-5-codex",
+                "messages": [{"role": "user", "content": "Hello"}]
+            });
+            if let Some(stream) = stream {
+                input["stream"] = json!(stream);
+            }
+
+            let result =
+                anthropic_to_responses_with_force_stream(input, None, false, false, false).unwrap();
+            assert_eq!(result.get("stream").and_then(Value::as_bool), stream);
+        }
     }
 
     #[test]
